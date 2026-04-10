@@ -1,10 +1,14 @@
 """
 TREND PULSE AI  —  Intelligent Google Trends Analytics Platform
 ===============================================================
-Fixes in this version:
+Fixes applied:
   ✓ Fixed ch_related_bar duplicate yaxis kwarg (TypeError crash)
   ✓ Added light / dark mode toggle (sidebar)
-  ✓ All v5 features retained
+  ✓ Theme toggle works correctly via st.rerun()
+  ✓ AI Insights regenerate on every "ANALYZE TRENDS" click (run_counter)
+  ✓ Graphs no longer show "undefined" — fixed Plotly layout merging
+  ✓ Graphs update dynamically on every button/setting change (cache busting)
+  ✓ Demo data is realistic with proper seasonal patterns and named seeds
 """
 
 # ── 1. urllib3 v2 Patch ───────────────────────────────────────────────────────
@@ -42,10 +46,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Theme init ────────────────────────────────────────────────────────────────
-if "theme" not in st.session_state:
-    st.session_state.theme = "dark"
+# ── Session state init (MUST be before theme read) ────────────────────────────
+for key, default in [
+    ("req_cache", {}), ("last_call_ts", 0.0),
+    ("demo_mode", False), ("ai_insights", {}),
+    ("alerts", []), ("alert_threshold", 70),
+    ("theme", "dark"), ("run_counter", 0),
+    ("last_keywords", []), ("last_tf", ""), ("last_geo", ""), ("last_cat", 0),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
+# ── Theme ─────────────────────────────────────────────────────────────────────
 IS_DARK = st.session_state.theme == "dark"
 
 # ── CSS (theme-aware) ─────────────────────────────────────────────────────────
@@ -281,6 +293,8 @@ _PLOT_LEGEND_BG    = "rgba(9,10,21,.95)" if IS_DARK else "rgba(255,255,255,.95)"
 _LAND_COLOR        = "#131428" if IS_DARK else "#e8e8f4"
 _OCEAN_COLOR       = "#04050d" if IS_DARK else "#d0d8f0"
 
+# FIX: Build BL as a plain dict — do NOT nest xaxis/yaxis as mutable defaults
+# All chart functions that need to override yaxis will copy this dict safely.
 BL = dict(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="IBM Plex Mono,monospace", color=_PLOT_FONT_COLOR, size=11),
@@ -296,6 +310,13 @@ BL = dict(
     hoverlabel=dict(bgcolor=_PLOT_HOVER_BG, bordercolor=_PLOT_HOVER_BDR,
                     font=dict(family="IBM Plex Mono", size=11, color=_PLOT_FONT_COLOR)),
 )
+
+def apply_layout(fig, overrides: dict):
+    """Apply BL base layout then overrides — prevents duplicate kwarg crashes."""
+    layout = dict(BL)
+    layout.update(overrides)
+    fig.update_layout(**layout)
+
 
 TIME_OPTS = {
     "Past Hour": "now 1-H", "Past 4 Hours": "now 4-H",
@@ -331,16 +352,6 @@ def rgba(h: str, a: float) -> str:
 def cache_key(*args) -> str:
     return hashlib.md5(json.dumps(args, default=str).encode()).hexdigest()[:16]
 
-# ── Session state init ────────────────────────────────────────────────────────
-for key, default in [
-    ("req_cache", {}), ("last_call_ts", 0.0),
-    ("demo_mode", False), ("ai_insights", {}),
-    ("alerts", []), ("alert_threshold", 70),
-    ("theme", "dark"),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
-
 
 def polite_sleep():
     elapsed = time.time() - st.session_state.last_call_ts
@@ -373,9 +384,18 @@ def call_with_backoff(fn, max_retries=4):
     return None, "Max retries exceeded"
 
 
-# ── Demo data ─────────────────────────────────────────────────────────────────
-def demo_over_time(keywords, timeframe):
-    np.random.seed(42)
+# ── Demo data — REALISTIC with per-run variation ──────────────────────────────
+# FIX: Use run_counter as part of seed so data changes on every "Analyze Trends"
+def _demo_seed(keywords, run_counter):
+    """Produce a deterministic-but-run-varying seed."""
+    base = hashlib.md5(json.dumps(list(keywords)).encode()).hexdigest()
+    return int(base[:8], 16) ^ (run_counter * 1337)
+
+
+def demo_over_time(keywords, timeframe, run_counter=0):
+    seed = _demo_seed(keywords, run_counter)
+    rng = np.random.default_rng(seed)
+
     if "H" in timeframe:
         periods, freq = 60, "min"
     elif "7-d" in timeframe or "1-d" in timeframe:
@@ -388,64 +408,106 @@ def demo_over_time(keywords, timeframe):
         periods, freq = 260, "W"
     else:
         periods, freq = 52, "W"
+
     dates = pd.date_range(end=datetime.today(), periods=periods, freq=freq)
     n = len(dates)
-    bases = [random.randint(25, 85) for _ in keywords]
-    data = {}
+
+    # Realistic baselines per keyword (slightly different each run)
+    kw_profiles = {}
     for i, kw in enumerate(keywords):
-        trend = np.linspace(0, random.choice([-1, 1]) * random.randint(5, 20), n)
-        noise = np.random.randn(n) * random.uniform(3, 9)
-        spike_idx = random.randint(n // 4, 3 * n // 4)
+        base = int(rng.integers(30, 75))
+        trend_dir = float(rng.choice([-1, 0, 1], p=[0.3, 0.2, 0.5]))
+        trend_strength = float(rng.uniform(3, 18))
+        noise_scale = float(rng.uniform(2, 7))
+        kw_profiles[kw] = (base, trend_dir, trend_strength, noise_scale)
+
+    data = {}
+    for kw in keywords:
+        base, t_dir, t_str, n_scale = kw_profiles[kw]
+        # Smooth trend
+        trend = np.linspace(0, t_dir * t_str, n)
+        # Seasonal pattern (weekly/monthly cycle)
+        seasonal = 6 * np.sin(np.linspace(0, 4 * np.pi, n))
+        # Gaussian noise
+        noise = rng.standard_normal(n) * n_scale
+        # Random spike event
         spike = np.zeros(n)
-        spike[spike_idx:min(spike_idx + 3, n)] = random.randint(10, 35)
-        vals = np.clip(bases[i] + trend + noise + spike, 0, 100).astype(int)
+        spike_idx = int(rng.integers(n // 5, 4 * n // 5))
+        spike_width = int(rng.integers(2, max(3, n // 15)))
+        spike_height = float(rng.uniform(12, 30))
+        for si in range(spike_idx, min(spike_idx + spike_width, n)):
+            decay = 1 - (si - spike_idx) / spike_width
+            spike[si] = spike_height * decay
+        vals = np.clip(base + trend + seasonal + noise + spike, 0, 100).astype(int)
         data[kw] = vals
+
     return pd.DataFrame(data, index=dates)
 
 
-def demo_by_region(keywords):
-    countries = ["United States","India","United Kingdom","Germany","Brazil",
-                 "Canada","Australia","France","Japan","Mexico",
-                 "Indonesia","South Korea","Italy","Spain","Netherlands"]
-    data = {kw: np.random.randint(10, 100, len(countries)) for kw in keywords}
+def demo_by_region(keywords, run_counter=0):
+    seed = _demo_seed(keywords, run_counter)
+    rng = np.random.default_rng(seed + 99)
+    countries = [
+        "United States", "India", "United Kingdom", "Germany", "Brazil",
+        "Canada", "Australia", "France", "Japan", "Mexico",
+        "Indonesia", "South Korea", "Italy", "Spain", "Netherlands",
+    ]
+    data = {kw: rng.integers(10, 100, len(countries)) for kw in keywords}
     return pd.DataFrame(data, index=countries)
 
 
-def demo_related(keywords):
+def demo_related(keywords, run_counter=0):
+    seed = _demo_seed(keywords, run_counter)
+    rng = np.random.default_rng(seed + 7)
     templates = {
-        "top": ["how to use {kw}","{kw} tutorial","{kw} vs gpt4","{kw} api","{kw} login",
-                "best {kw} prompts","{kw} pricing","{kw} free","{kw} download","{kw} review"],
-        "rising": ["{kw} 2025","{kw} news","new {kw} features","{kw} update","{kw} alternative",
-                   "{kw} benchmark","{kw} comparison","{kw} image","{kw} code","{kw} enterprise"],
+        "top": [
+            "how to use {kw}", "{kw} tutorial", "{kw} vs gpt4", "{kw} api",
+            "{kw} login", "best {kw} prompts", "{kw} pricing", "{kw} free",
+            "{kw} download", "{kw} review",
+        ],
+        "rising": [
+            "{kw} 2025", "{kw} news", "new {kw} features", "{kw} update",
+            "{kw} alternative", "{kw} benchmark", "{kw} comparison", "{kw} image",
+            "{kw} code", "{kw} enterprise",
+        ],
     }
     result = {}
     for kw in keywords:
         top_q = [q.replace("{kw}", kw) for q in templates["top"]]
         ris_q = [q.replace("{kw}", kw) for q in templates["rising"]]
+        top_vals = sorted(rng.integers(40, 100, 10).tolist(), reverse=True)
+        ris_vals = sorted(rng.integers(200, 5000, 10).tolist(), reverse=True)
         result[kw] = {
-            "top": pd.DataFrame({"query": top_q, "value": sorted(np.random.randint(40, 100, 10), reverse=True)}),
-            "rising": pd.DataFrame({"query": ris_q, "value": sorted(np.random.randint(200, 5000, 10), reverse=True)}),
+            "top": pd.DataFrame({"query": top_q, "value": top_vals}),
+            "rising": pd.DataFrame({"query": ris_q, "value": ris_vals}),
         }
     return result
 
 
-def demo_trending():
-    items = ["OpenAI GPT-5","Apple Intelligence","Formula 1","Python 3.13",
-             "World Cup 2026","Claude 4","Llama 3","Tesla Cybertruck",
-             "Nintendo Switch 2","Solar Eclipse","SpaceX Starship","Taylor Swift",
-             "Bitcoin ETF","Gemini Ultra","Vision Pro 2"]
-    return pd.DataFrame(items, columns=["Trending Query"])
+def demo_trending(run_counter=0):
+    rng = np.random.default_rng(run_counter * 42 + 13)
+    pool = [
+        "OpenAI GPT-5", "Apple Intelligence", "Formula 1", "Python 3.13",
+        "World Cup 2026", "Claude 4", "Llama 3", "Tesla Cybertruck",
+        "Nintendo Switch 2", "Solar Eclipse", "SpaceX Starship", "Taylor Swift",
+        "Bitcoin ETF", "Gemini Ultra", "Vision Pro 2", "Sora Video AI",
+        "Anthropic Claude", "Mistral AI", "Perplexity AI", "Grok 3",
+    ]
+    chosen = rng.choice(pool, size=min(15, len(pool)), replace=False).tolist()
+    return pd.DataFrame(chosen, columns=["Trending Query"])
 
 
 # ── Fetchers ──────────────────────────────────────────────────────────────────
-def get_over_time(kws, tf, geo, cat):
-    key = cache_key("ot", kws, tf, geo, cat)
+def get_over_time(kws, tf, geo, cat, run_counter=0):
+    # FIX: include run_counter in cache key so new data on each run
+    key = cache_key("ot", kws, tf, geo, cat, run_counter)
     if key in st.session_state.req_cache:
         return st.session_state.req_cache[key], None, False
     if st.session_state.demo_mode:
-        data = demo_over_time(list(kws), tf)
+        data = demo_over_time(list(kws), tf, run_counter)
         st.session_state.req_cache[key] = data
         return data, None, True
+
     def _fetch():
         pt = make_pt()
         pt.build_payload(list(kws), cat=cat, timeframe=tf, geo=geo)
@@ -453,74 +515,83 @@ def get_over_time(kws, tf, geo, cat):
         if not df.empty and "isPartial" in df.columns:
             df = df.drop(columns=["isPartial"])
         return df
+
     data, err = call_with_backoff(_fetch)
     if err or (data is not None and data.empty):
-        data = demo_over_time(list(kws), tf)
+        data = demo_over_time(list(kws), tf, run_counter)
         st.session_state.req_cache[key] = data
         return data, err, True
     st.session_state.req_cache[key] = data
     return data, None, False
 
 
-def get_by_region(kws, tf, geo, cat):
-    key = cache_key("br", kws, tf, geo, cat)
+def get_by_region(kws, tf, geo, cat, run_counter=0):
+    key = cache_key("br", kws, tf, geo, cat, run_counter)
     if key in st.session_state.req_cache:
         return st.session_state.req_cache[key], False
     if st.session_state.demo_mode:
-        data = demo_by_region(list(kws))
+        data = demo_by_region(list(kws), run_counter)
         st.session_state.req_cache[key] = data
         return data, True
+
     def _fetch():
         pt = make_pt()
         pt.build_payload(list(kws), cat=cat, timeframe=tf, geo=geo)
         return pt.interest_by_region(resolution="COUNTRY", inc_low_vol=True)
+
     data, err = call_with_backoff(_fetch)
     if err or data is None or data.empty:
-        data = demo_by_region(list(kws))
+        data = demo_by_region(list(kws), run_counter)
         st.session_state.req_cache[key] = data
         return data, True
     st.session_state.req_cache[key] = data
     return data, False
 
 
-def get_related(kws, tf, geo, cat):
-    key = cache_key("rq", kws, tf, geo, cat)
+def get_related(kws, tf, geo, cat, run_counter=0):
+    key = cache_key("rq", kws, tf, geo, cat, run_counter)
     if key in st.session_state.req_cache:
         return st.session_state.req_cache[key], False
     if st.session_state.demo_mode:
-        data = demo_related(list(kws))
+        data = demo_related(list(kws), run_counter)
         st.session_state.req_cache[key] = data
         return data, True
+
     def _fetch():
         pt = make_pt()
         pt.build_payload(list(kws), cat=cat, timeframe=tf, geo=geo)
         return pt.related_queries()
+
     data, err = call_with_backoff(_fetch)
     if err or not data:
-        data = demo_related(list(kws))
+        data = demo_related(list(kws), run_counter)
         st.session_state.req_cache[key] = data
         return data, True
     st.session_state.req_cache[key] = data
     return data, False
 
 
-def get_trending(geo):
-    key = cache_key("tr", geo)
+def get_trending(geo, run_counter=0):
+    key = cache_key("tr", geo, run_counter)
     if key in st.session_state.req_cache:
         return st.session_state.req_cache[key], False
     if st.session_state.demo_mode:
-        data = demo_trending()
+        data = demo_trending(run_counter)
         st.session_state.req_cache[key] = data
         return data, True
-    pn_map = {"US":"united_states","GB":"united_kingdom","IN":"india","DE":"germany",
-              "FR":"france","BR":"brazil","JP":"japan","AU":"australia",
-              "CA":"canada","MX":"mexico","KR":"south_korea"}
+    pn_map = {
+        "US": "united_states", "GB": "united_kingdom", "IN": "india",
+        "DE": "germany", "FR": "france", "BR": "brazil", "JP": "japan",
+        "AU": "australia", "CA": "canada", "MX": "mexico", "KR": "south_korea",
+    }
+
     def _fetch():
         pt = make_pt()
         return pt.trending_searches(pn=pn_map.get(geo, "united_states"))
+
     data, err = call_with_backoff(_fetch)
     if err or data is None or data.empty:
-        data = demo_trending()
+        data = demo_trending(run_counter)
         st.session_state.req_cache[key] = data
         return data, True
     st.session_state.req_cache[key] = data
@@ -576,7 +647,8 @@ def predict_trend(df, kw, forecast_days=30):
     last_date = df.index[-1]
     future_dates = [last_date + freq * (i + 1) for i in range(forecast_days)]
 
-    direction = "rising" if model.coef_[0] > 0.05 else ("declining" if model.coef_[0] < -0.05 else "stable")
+    direction = ("rising" if model.coef_[0] > 0.05
+                 else ("declining" if model.coef_[0] < -0.05 else "stable"))
     return future_dates, pred.tolist(), direction, round(r2, 3)
 
 
@@ -656,9 +728,11 @@ def generate_ai_insight(df, kws, related=None):
 
     if len(valid) >= 2:
         corr_matrix = df[valid].corr()
-        pairs = [(corr_matrix.loc[a, b], a, b)
-                 for i, a in enumerate(valid)
-                 for j, b in enumerate(valid) if i < j]
+        pairs = [
+            (corr_matrix.loc[a, b], a, b)
+            for i, a in enumerate(valid)
+            for j, b in enumerate(valid) if i < j
+        ]
         if pairs:
             max_corr = max(pairs, key=lambda x: abs(x[0]))
             r, a, b = max_corr
@@ -689,7 +763,7 @@ def generate_battle_summary(df, kws):
     if len(valid) < 2:
         return None, {}
 
-    avgs = {k: df[k].mean() for k in valid}
+    avgs  = {k: df[k].mean() for k in valid}
     peaks = {k: df[k].max() for k in valid}
     moms  = {k: compute_momentum(df, k) for k in valid}
     vols  = {k: compute_volatility(df, k) for k in valid}
@@ -705,29 +779,37 @@ def generate_battle_summary(df, kws):
         f"🎯 **Most Consistent:** {most_consistent}  ·  "
         f"⚡ **Highest Peak:** {highest_peak} ({int(peaks[highest_peak])}/100)"
     )
-    scores = {k: round((avgs[k] * 0.5 + max(moms[k], 0) * 0.3 + (100 - vols[k]) * 0.2), 1) for k in valid}
+    scores = {
+        k: round((avgs[k] * 0.5 + max(moms[k], 0) * 0.3 + (100 - vols[k]) * 0.2), 1)
+        for k in valid
+    }
     return summary, scores
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CHART BUILDERS
+# FIX: All chart functions now use apply_layout() to prevent
+# duplicate keyword argument crashes that caused "undefined" labels.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 def ch_line(df, kws, stacked=False):
     fig = go.Figure()
     for i, kw in enumerate(kws):
         if kw not in df.columns:
             continue
         c = PAL[i % len(PAL)]
-        args = dict(x=df.index, y=df[kw], name=kw,
-                    line=dict(color=c, width=2.2, shape="spline", smoothing=0.7),
-                    hovertemplate=f"<b>{kw}</b>: %{{y}}<extra></extra>")
+        args = dict(
+            x=df.index, y=df[kw], name=kw,
+            line=dict(color=c, width=2.2, shape="spline", smoothing=0.7),
+            hovertemplate=f"<b>{kw}</b>: %{{y}}<extra></extra>",
+        )
         if stacked:
             fig.add_trace(go.Scatter(**args, mode="lines", stackgroup="one",
                                      fillcolor=rgba(c, .28)))
         else:
             fig.add_trace(go.Scatter(**args, mode="lines", fill="tozeroy",
                                      fillcolor=rgba(c, .07)))
-    fig.update_layout(**BL, height=370)
+    apply_layout(fig, {"height": 370})
     return fig
 
 
@@ -755,7 +837,7 @@ def ch_line_with_forecast(df, kw, color):
             line=dict(color=color, width=1.8, dash="dot"),
             hovertemplate=f"<b>Forecast</b>: %{{y:.1f}}<extra></extra>",
         ))
-    fig.update_layout(**BL, height=310, title_text=f"Trend + 30-day Forecast")
+    apply_layout(fig, {"height": 310, "title_text": "Trend + 30-day Forecast"})
     return fig, direction, r2
 
 
@@ -764,15 +846,16 @@ def ch_corr(df, kws):
     if len(valid) < 2:
         return None
     corr = df[valid].corr().round(3)
+    mid_color = "#09091a" if IS_DARK else "#f4f4f8"
     fig = go.Figure(go.Heatmap(
-        z=corr.values, x=corr.columns, y=corr.index,
-        colorscale=[[0, "#ff4d6d"], [.5, "#09091a" if IS_DARK else "#f4f4f8"], [1, "#00f5d4"]],
+        z=corr.values, x=corr.columns.tolist(), y=corr.index.tolist(),
+        colorscale=[[0, "#ff4d6d"], [.5, mid_color], [1, "#00f5d4"]],
         zmin=-1, zmax=1,
         text=[[f"{v:.2f}" for v in row] for row in corr.values],
         texttemplate="%{text}", textfont=dict(family="IBM Plex Mono", size=12),
         hovertemplate="%{x} × %{y}<br>r = %{z:.3f}<extra></extra>",
     ))
-    fig.update_layout(**BL, height=260)
+    apply_layout(fig, {"height": 260})
     return fig
 
 
@@ -782,18 +865,27 @@ def ch_geo_map(geo_df, kw):
     d = geo_df[[kw]].reset_index()
     d.columns = ["location", "value"]
     d = d[d["value"] > 0]
-    fig = px.choropleth(d, locations="location", locationmode="country names",
-                        color="value", hover_name="location", labels={"value": "Interest"},
-                        color_continuous_scale=[[0, "#04050d" if IS_DARK else "#f4f4f8"],
-                                                [.3, "#1a1040" if IS_DARK else "#d8d0f0"],
-                                                [.7, "#6c63ff"], [1, "#00f5d4"]])
-    fig.update_layout(**BL, height=340,
-                      geo=dict(bgcolor="rgba(0,0,0,0)", landcolor=_LAND_COLOR,
-                               oceancolor=_OCEAN_COLOR, showocean=True, lakecolor=_OCEAN_COLOR,
-                               framecolor=_PLOT_LINE_COLOR, projection_type="natural earth"),
-                      coloraxis_colorbar=dict(bgcolor="rgba(0,0,0,0)",
-                                             tickfont=dict(family="IBM Plex Mono", size=9,
-                                                          color=_PLOT_FONT_COLOR)))
+    fig = px.choropleth(
+        d, locations="location", locationmode="country names",
+        color="value", hover_name="location", labels={"value": "Interest"},
+        color_continuous_scale=[
+            [0, "#04050d" if IS_DARK else "#f4f4f8"],
+            [.3, "#1a1040" if IS_DARK else "#d8d0f0"],
+            [.7, "#6c63ff"], [1, "#00f5d4"],
+        ],
+    )
+    apply_layout(fig, {
+        "height": 340,
+        "geo": dict(
+            bgcolor="rgba(0,0,0,0)", landcolor=_LAND_COLOR,
+            oceancolor=_OCEAN_COLOR, showocean=True, lakecolor=_OCEAN_COLOR,
+            framecolor=_PLOT_LINE_COLOR, projection_type="natural earth",
+        ),
+        "coloraxis_colorbar": dict(
+            bgcolor="rgba(0,0,0,0)",
+            tickfont=dict(family="IBM Plex Mono", size=9, color=_PLOT_FONT_COLOR),
+        ),
+    })
     return fig
 
 
@@ -806,22 +898,26 @@ def ch_geo_bar(geo_df, kws, top=15):
     fig = go.Figure()
     for i, kw in enumerate(valid):
         c = PAL[i % len(PAL)]
-        fig.add_trace(go.Bar(x=sub.index, y=sub[kw], name=kw,
-                             marker_color=c, marker_line_width=0,
-                             hovertemplate=f"<b>%{{x}}</b><br>{kw}: %{{y}}<extra></extra>"))
-    fig.update_layout(**BL, height=290, barmode="group", bargap=0.18)
+        fig.add_trace(go.Bar(
+            x=sub.index.tolist(), y=sub[kw].tolist(), name=kw,
+            marker_color=c, marker_line_width=0,
+            hovertemplate=f"<b>%{{x}}</b><br>{kw}: %{{y}}<extra></extra>",
+        ))
+    apply_layout(fig, {"height": 290, "barmode": "group", "bargap": 0.18})
     return fig
 
 
 def ch_bar_avg(df, kws):
-    avgs = {k: round(df[k].mean(), 1) for k in kws if k in df.columns}
+    avgs = {k: round(float(df[k].mean()), 1) for k in kws if k in df.columns}
     ks = sorted(avgs, key=avgs.get, reverse=True)
     fig = go.Figure()
     for i, kw in enumerate(ks):
-        fig.add_trace(go.Bar(x=[kw], y=[avgs[kw]], name=kw,
-                             marker_color=PAL[i % len(PAL)], marker_line_width=0,
-                             hovertemplate=f"<b>{kw}</b><br>Avg: %{{y:.1f}}<extra></extra>"))
-    fig.update_layout(**BL, height=270, showlegend=False, barmode="group", bargap=0.3)
+        fig.add_trace(go.Bar(
+            x=[kw], y=[avgs[kw]], name=kw,
+            marker_color=PAL[i % len(PAL)], marker_line_width=0,
+            hovertemplate=f"<b>{kw}</b><br>Avg: %{{y:.1f}}<extra></extra>",
+        ))
+    apply_layout(fig, {"height": 270, "showlegend": False, "barmode": "group", "bargap": 0.3})
     return fig
 
 
@@ -831,15 +927,17 @@ def ch_box(df, kws):
         if kw not in df.columns:
             continue
         c = PAL[i % len(PAL)]
-        fig.add_trace(go.Box(y=df[kw], name=kw, marker_color=c, line_color=c,
-                             fillcolor=rgba(c, .15), boxmean="sd",
-                             hovertemplate=f"<b>{kw}</b><br>%{{y}}<extra></extra>"))
-    fig.update_layout(**BL, height=270, showlegend=False)
+        fig.add_trace(go.Box(
+            y=df[kw].tolist(), name=kw, marker_color=c, line_color=c,
+            fillcolor=rgba(c, .15), boxmean="sd",
+            hovertemplate=f"<b>{kw}</b><br>%{{y}}<extra></extra>",
+        ))
+    apply_layout(fig, {"height": 270, "showlegend": False})
     return fig
 
 
 def ch_radar(df, kws):
-    avgs = {k: df[k].mean() for k in kws if k in df.columns}
+    avgs = {k: float(df[k].mean()) for k in kws if k in df.columns}
     if len(avgs) < 2:
         return None
     ks, vs = list(avgs.keys()), list(avgs.values())
@@ -849,12 +947,20 @@ def ch_radar(df, kws):
         line=dict(color="#6c63ff", width=2),
         marker=dict(color="#00f5d4", size=8),
     ))
-    fig.update_layout(**BL, height=290,
-                      polar=dict(bgcolor="rgba(0,0,0,0)",
-                                 radialaxis=dict(visible=True, gridcolor=_PLOT_GRID_COLOR,
-                                                tickfont=dict(size=9, color=_PLOT_FONT_COLOR)),
-                                 angularaxis=dict(gridcolor=_PLOT_GRID_COLOR,
-                                                 tickfont=dict(size=10, color=_PLOT_FONT_COLOR))))
+    apply_layout(fig, {
+        "height": 290,
+        "polar": dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(
+                visible=True, gridcolor=_PLOT_GRID_COLOR,
+                tickfont=dict(size=9, color=_PLOT_FONT_COLOR),
+            ),
+            angularaxis=dict(
+                gridcolor=_PLOT_GRID_COLOR,
+                tickfont=dict(size=10, color=_PLOT_FONT_COLOR),
+            ),
+        ),
+    })
     return fig
 
 
@@ -866,11 +972,11 @@ def ch_rolling(df, kws, w=7):
         c = PAL[i % len(PAL)]
         roll = df[kw].rolling(w, min_periods=1).mean()
         fig.add_trace(go.Scatter(
-            x=df.index, y=roll, name=kw, mode="lines",
+            x=df.index.tolist(), y=roll.tolist(), name=kw, mode="lines",
             line=dict(color=c, width=2.2),
             hovertemplate=f"<b>{kw}</b><br>%{{x}}<br>Rolling avg: %{{y:.1f}}<extra></extra>",
         ))
-    fig.update_layout(**BL, height=270)
+    apply_layout(fig, {"height": 270})
     return fig
 
 
@@ -880,44 +986,52 @@ def ch_momentum(df, kws):
     for kw in kws:
         if kw not in df.columns:
             continue
-        f = df[kw].iloc[:q].mean()
-        l = df[kw].iloc[-q:].mean()
+        f = float(df[kw].iloc[:q].mean())
+        l = float(df[kw].iloc[-q:].mean())
         rows.append({"kw": kw, "chg": round(((l - f) / (f + 1e-9)) * 100, 1)})
     if not rows:
         return None
     fig = go.Figure()
     for i, r in enumerate(rows):
         c = "#00f5d4" if r["chg"] >= 0 else "#ff4d6d"
-        fig.add_trace(go.Bar(x=[r["kw"]], y=[r["chg"]], name=r["kw"],
-                             marker_color=c, marker_line_width=0,
-                             hovertemplate=f"<b>{r['kw']}</b><br>Δ %{{y:+.1f}}%<extra></extra>"))
+        fig.add_trace(go.Bar(
+            x=[r["kw"]], y=[r["chg"]], name=r["kw"],
+            marker_color=c, marker_line_width=0,
+            hovertemplate=f"<b>{r['kw']}</b><br>Δ %{{y:+.1f}}%<extra></extra>",
+        ))
     fig.add_hline(y=0, line_color=_PLOT_LINE_COLOR, line_width=1)
-    fig.update_layout(**BL, height=240, showlegend=False, yaxis_title="% Change")
+    apply_layout(fig, {
+        "height": 240, "showlegend": False,
+        "yaxis": {**BL["yaxis"], "title": "% Change"},
+    })
     return fig
 
 
-# ── FIX: ch_related_bar — no more duplicate yaxis kwarg ──────────────────────
+# FIX: ch_related_bar — safe yaxis override via apply_layout
 def ch_related_bar(df_q, color, title):
     if df_q is None or df_q.empty:
         return None
-    d = df_q.head(10)
-    # Build layout by merging BL then overriding yaxis separately (avoids duplicate kwarg)
-    layout = {
-        **BL,
-        "height": 270,
-        "showlegend": False,
-        "yaxis": {**BL["yaxis"], "autorange": "reversed"},
-        "title_text": title,
-        "title_font": dict(size=12),
-    }
+    d = df_q.head(10).copy()
     fig = go.Figure(go.Bar(
-        x=d["value"], y=d["query"], orientation="h",
+        x=d["value"].tolist(), y=d["query"].tolist(), orientation="h",
         marker_color=color, marker_line_width=0,
         hovertemplate="%{y}<br>Value: %{x}<extra></extra>",
     ))
-    fig.update_layout(**layout)
+    apply_layout(fig, {
+        "height": 270,
+        "showlegend": False,
+        "title_text": title,
+        "title_font": dict(size=12),
+        # FIX: Override yaxis entirely as a new dict — no spreading BL["yaxis"]
+        "yaxis": dict(
+            gridcolor=_PLOT_GRID_COLOR,
+            linecolor=_PLOT_LINE_COLOR,
+            tickfont=dict(size=10, color=_PLOT_FONT_COLOR),
+            zeroline=False,
+            autorange="reversed",   # This was the crash — now safely in one dict
+        ),
+    })
     return fig
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def ch_battle_scores(scores, kws):
@@ -925,12 +1039,16 @@ def ch_battle_scores(scores, kws):
     fig = go.Figure()
     for i, kw in enumerate(ks):
         c = PAL[i % len(PAL)]
-        fig.add_trace(go.Bar(x=[kw], y=[scores[kw]], name=kw,
-                             marker_color=c, marker_line_width=0,
-                             hovertemplate=f"<b>{kw}</b><br>Battle Score: %{{y:.1f}}<extra></extra>"))
-    fig.update_layout(**BL, height=240, showlegend=False,
-                      title_text="Composite Battle Score",
-                      yaxis_title="Score")
+        fig.add_trace(go.Bar(
+            x=[kw], y=[scores[kw]], name=kw,
+            marker_color=c, marker_line_width=0,
+            hovertemplate=f"<b>{kw}</b><br>Battle Score: %{{y:.1f}}<extra></extra>",
+        ))
+    apply_layout(fig, {
+        "height": 240, "showlegend": False,
+        "title_text": "Composite Battle Score",
+        "yaxis": {**BL["yaxis"], "title": "Score"},
+    })
     return fig
 
 
@@ -938,7 +1056,10 @@ def styled_table(df: pd.DataFrame):
     cols = list(df.columns)
     rows_html = ""
     for _, row in df.iterrows():
-        row_html = f"<tr><td style='color:#6666aa;font-weight:700;padding:6px 12px;white-space:nowrap;'>{row.name}</td>"
+        row_html = (
+            f"<tr><td style='color:#6666aa;font-weight:700;padding:6px 12px;"
+            f"white-space:nowrap;'>{row.name}</td>"
+        )
         for col in cols:
             val = row[col]
             if isinstance(val, (int, float)) and not pd.isna(val):
@@ -952,7 +1073,8 @@ def styled_table(df: pd.DataFrame):
     header_html = "<tr><th style='padding:6px 12px;'></th>" + "".join(
         f"<th style='padding:6px 12px;color:#6666aa;font-family:IBM Plex Mono,monospace;"
         f"font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;text-align:right;'>{c}</th>"
-        for c in cols) + "</tr>"
+        for c in cols
+    ) + "</tr>"
 
     surf = "#090a15" if IS_DARK else "#ffffff"
     return f"""
@@ -993,16 +1115,19 @@ with st.sidebar:
       </div>
       <div style='font-family:IBM Plex Mono,monospace;font-size:.52rem;color:#6666aa;
                   letter-spacing:.15em;text-transform:uppercase;margin-top:.1rem;'>
-        Intelligent Trends Platform v5.1
+        Intelligent Trends Platform v5.2
       </div>
     </div>""", unsafe_allow_html=True)
 
     # ── Theme toggle ──────────────────────────────────────────────────────────
     st.markdown('<div class="sh">Appearance</div>', unsafe_allow_html=True)
-    theme_icon = "🌙" if IS_DARK else "☀️"
+    theme_icon  = "🌙" if IS_DARK else "☀️"
     theme_label = "Switch to Light Mode" if IS_DARK else "Switch to Dark Mode"
-    if st.button(f"{theme_icon}  {theme_label}", use_container_width=True):
+    if st.button(f"{theme_icon}  {theme_label}", use_container_width=True, key="theme_btn"):
         st.session_state.theme = "light" if IS_DARK else "dark"
+        # FIX: Clear cache so theme-specific plot colors regenerate
+        st.session_state.req_cache = {}
+        st.session_state.ai_insights = {}
         st.rerun()
 
     st.markdown('<div class="sh">Keywords (max 5)</div>', unsafe_allow_html=True)
@@ -1020,22 +1145,33 @@ with st.sidebar:
     alert_threshold = st.slider(
         "Alert Threshold (interest score)",
         min_value=20, max_value=95, value=70, step=5,
-        help="Get alerted when any keyword's interest exceeds this level."
+        help="Get alerted when any keyword's interest exceeds this level.",
     )
     st.session_state.alert_threshold = alert_threshold
 
     st.markdown('<div class="sh">Mode</div>', unsafe_allow_html=True)
     demo_toggle = st.toggle("Demo Mode (no Google calls)", value=st.session_state.demo_mode)
-    st.session_state.demo_mode = demo_toggle
+    # FIX: if demo mode toggled, bust cache so fresh data loads
+    if demo_toggle != st.session_state.demo_mode:
+        st.session_state.demo_mode = demo_toggle
+        st.session_state.req_cache = {}
+        st.session_state.ai_insights = {}
+        st.rerun()
 
     if st.button("🗑  Clear Cache", use_container_width=True):
         st.session_state.req_cache = {}
         st.session_state.last_call_ts = 0.0
         st.session_state.ai_insights = {}
+        st.session_state.run_counter = 0
         st.toast("Cache cleared!", icon="✅")
 
     st.markdown("")
-    run = st.button("⚡  ANALYZE TRENDS", use_container_width=True)
+    run = st.button("⚡  ANALYZE TRENDS", use_container_width=True, key="analyze_btn")
+
+    # FIX: Increment run_counter on every "Analyze" click so fresh data + insights appear
+    if run:
+        st.session_state.run_counter += 1
+        st.session_state.ai_insights = {}   # force insight regeneration
 
     st.markdown(f"""
     <div style='margin-top:1.2rem;padding:.8rem;background:var(--surf2);border:1px solid var(--bdr);
@@ -1065,6 +1201,7 @@ with hc1:
       <p class='hero-sub'>Google Trends · Predictions · AI Insights · Battle Mode · Alerts</p>
     </div>""", unsafe_allow_html=True)
 with hc2:
+    run_label = f"RUN #{st.session_state.run_counter}" if st.session_state.run_counter > 0 else "READY"
     st.markdown(f"""
     <div style='text-align:right;padding-top:.7rem;'>
       <div style='font-family:IBM Plex Mono;font-size:.54rem;color:#6666aa;'>LIVE AS OF</div>
@@ -1075,7 +1212,7 @@ with hc2:
         {geo_lbl} · {tf_lbl}
       </div>
       <div style='font-family:IBM Plex Mono;font-size:.5rem;color:#6666aa;margin-top:.12rem;'>
-        {"🌙 DARK" if IS_DARK else "☀️ LIGHT"} MODE
+        {"🌙 DARK" if IS_DARK else "☀️ LIGHT"} MODE &nbsp;·&nbsp; {run_label}
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -1100,9 +1237,10 @@ tf  = TIME_OPTS[tf_lbl]
 geo = GEO_OPTS[geo_lbl]
 cat = CAT_OPTS[cat_lbl]
 kws = tuple(keywords)
+run_counter = st.session_state.run_counter
 
 with st.spinner("Fetching trend data…"):
-    df, fetch_err, is_demo = get_over_time(kws, tf, geo, cat)
+    df, fetch_err, is_demo = get_over_time(kws, tf, geo, cat, run_counter)
 
 if is_demo:
     banner_msg = (
@@ -1132,7 +1270,7 @@ if alerts:
             f"<div class='insight-box alert'>"
             f"{a['icon']} {a['msg']}"
             f"</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1208,9 +1346,9 @@ with t2:
         fig, direction, r2 = ch_line_with_forecast(df, kw, c)
         if fig:
             dir_color = "#00f5d4" if direction == "rising" else ("#ff4d6d" if direction == "declining" else "#a78bfa")
-            dir_icon = "🟢" if direction == "rising" else ("🔴" if direction == "declining" else "🟡")
+            dir_icon  = "🟢" if direction == "rising" else ("🔴" if direction == "declining" else "🟡")
             future_dates, pred_vals, _, _ = predict_trend(df, kw, 30)
-            pred_7 = round(pred_vals[6], 0) if pred_vals and len(pred_vals) > 6 else "—"
+            pred_7  = round(pred_vals[6],  0) if pred_vals and len(pred_vals) > 6 else "—"
             pred_30 = round(pred_vals[-1], 0) if pred_vals else "—"
 
             col1, col2 = st.columns([3, 1])
@@ -1242,10 +1380,11 @@ with t2:
 with t3:
     st.markdown('<div class="sh">AI-Generated Analysis</div>', unsafe_allow_html=True)
 
-    insight_key = cache_key("insight", valid, tf, geo)
+    # FIX: include run_counter in insight key so insights always regenerate on Analyze
+    insight_key = cache_key("insight", valid, tf, geo, run_counter)
     if insight_key not in st.session_state.ai_insights:
         with st.spinner("Generating AI insights…"):
-            rel_data, _ = get_related(kws, tf, geo, cat)
+            rel_data, _ = get_related(kws, tf, geo, cat, run_counter)
             insight_text = generate_ai_insight(df, valid, rel_data)
             st.session_state.ai_insights[insight_key] = insight_text
     else:
@@ -1257,9 +1396,9 @@ with t3:
     cols = st.columns(len(valid))
     for i, kw in enumerate(valid):
         c = PAL[i % len(PAL)]
-        mom = compute_momentum(df, kw)
-        vol = compute_volatility(df, kw)
-        spike = compute_spike_score(df, kw)
+        mom    = compute_momentum(df, kw)
+        vol    = compute_volatility(df, kw)
+        spike  = compute_spike_score(df, kw)
         _, _, direction, r2 = predict_trend(df, kw)
         stability = 100 - vol
 
@@ -1289,17 +1428,20 @@ with t3:
                     continue
                 r = corr.loc[a, b]
                 if abs(r) >= 0.7:
-                    strength = "strongly correlated"
-                    color = "#00f5d4"
-                    desc = "share a common search audience and often trend together."
+                    strength, color, desc = (
+                        "strongly correlated", "#00f5d4",
+                        "share a common search audience and often trend together.",
+                    )
                 elif abs(r) >= 0.4:
-                    strength = "moderately correlated"
-                    color = "#ffbe0b"
-                    desc = "show some overlapping interest patterns."
+                    strength, color, desc = (
+                        "moderately correlated", "#ffbe0b",
+                        "show some overlapping interest patterns.",
+                    )
                 else:
-                    strength = "weakly correlated"
-                    color = "#ff4d6d"
-                    desc = "behave independently — different audiences or use cases."
+                    strength, color, desc = (
+                        "weakly correlated", "#ff4d6d",
+                        "behave independently — different audiences or use cases.",
+                    )
                 direction_str = "positively" if r > 0 else "negatively"
                 interp_html += f"""
                 <div style='background:var(--surf2);border:1px solid var(--bdr);border-radius:10px;
@@ -1358,7 +1500,7 @@ with t4:
             _, _, direction, r2 = predict_trend(df, kw)
             battle_data.append({
                 "Keyword": kw,
-                "Avg Interest": round(df[kw].mean(), 1),
+                "Avg Interest": round(float(df[kw].mean()), 1),
                 "Peak": int(df[kw].max()),
                 "Momentum %": f"{compute_momentum(df, kw):+.1f}",
                 "Volatility": round(compute_volatility(df, kw), 1),
@@ -1372,7 +1514,7 @@ with t4:
 # ── Tab 5 ─────────────────────────────────────────────────────────────────────
 with t5:
     with st.spinner("Loading geographic data…"):
-        gdf, g_demo = get_by_region(kws, tf, geo, cat)
+        gdf, g_demo = get_by_region(kws, tf, geo, cat, run_counter)
 
     if g_demo and not st.session_state.demo_mode:
         st.warning("Geographic data fell back to demo due to rate limiting.")
@@ -1394,7 +1536,7 @@ with t5:
 # ── Tab 6 ─────────────────────────────────────────────────────────────────────
 with t6:
     with st.spinner("Loading related queries…"):
-        rel, rq_demo = get_related(kws, tf, geo, cat)
+        rel, rq_demo = get_related(kws, tf, geo, cat, run_counter)
 
     if rq_demo and not st.session_state.demo_mode:
         st.warning("Related queries fell back to demo due to rate limiting.")
@@ -1451,7 +1593,9 @@ st.markdown("<hr style='margin-top:1.8rem;'>", unsafe_allow_html=True)
 st.markdown(f"""
 <div style='font-family:IBM Plex Mono,monospace;font-size:.52rem;color:#6666aa;
             display:flex;justify-content:space-between;padding:.35rem 0 1rem;flex-wrap:wrap;gap:.35rem;'>
-  <span>TREND PULSE AI v5.1 &nbsp;·&nbsp; urllib3 v2 ✓ &nbsp;·&nbsp; sklearn ✓ &nbsp;·&nbsp; Bug fixes ✓</span>
+  <span>TREND PULSE AI v5.2 &nbsp;·&nbsp; urllib3 v2 ✓ &nbsp;·&nbsp; sklearn ✓ &nbsp;·&nbsp; Dynamic refresh ✓</span>
   <span>{geo_lbl} &nbsp;·&nbsp; {tf_lbl} &nbsp;·&nbsp; {cat_lbl}</span>
-  <span>{'⚡ DEMO DATA' if (is_demo or st.session_state.demo_mode) else '🌐 LIVE DATA'} &nbsp;·&nbsp; {"🌙 Dark" if IS_DARK else "☀️ Light"} Mode</span>
+  <span>{'⚡ DEMO DATA' if (is_demo or st.session_state.demo_mode) else '🌐 LIVE DATA'}
+  &nbsp;·&nbsp; {"🌙 Dark" if IS_DARK else "☀️ Light"} Mode
+  &nbsp;·&nbsp; Run #{st.session_state.run_counter}</span>
 </div>""", unsafe_allow_html=True)
