@@ -206,4 +206,4 @@ This project is for educational and demonstration purposes.
 
 
 
-Just tell me 👍
+The app link is:- https://trend-pulse-yg2kukboj8nkucagathrsq.streamlit.app/
