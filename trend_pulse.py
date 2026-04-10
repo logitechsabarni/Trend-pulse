@@ -1,14 +1,10 @@
 """
 TREND PULSE AI  —  Intelligent Google Trends Analytics Platform
 ===============================================================
-New in this version:
-  ✓ AI Insight Generator (Claude-powered natural language insights)
-  ✓ Trend Prediction (linear regression forecast, 30-day)
-  ✓ Trend Alert System (spike detection + threshold alerts)
-  ✓ Keyword Battle Mode (winner + fastest growth summary)
-  ✓ Correlation Insights (human-readable interpretation)
-  ✓ Momentum Score & Volatility Indicator
-  ✓ All v4 fixes retained (urllib3 v2, 429 backoff, demo mode)
+Fixes in this version:
+  ✓ Fixed ch_related_bar duplicate yaxis kwarg (TypeError crash)
+  ✓ Added light / dark mode toggle (sidebar)
+  ✓ All v5 features retained
 """
 
 # ── 1. urllib3 v2 Patch ───────────────────────────────────────────────────────
@@ -46,225 +42,259 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Clash+Display:wght@400;500;600;700&family=Epilogue:wght@300;400;500;700;800;900&display=swap');
+# ── Theme init ────────────────────────────────────────────────────────────────
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 
-:root{
+IS_DARK = st.session_state.theme == "dark"
+
+# ── CSS (theme-aware) ─────────────────────────────────────────────────────────
+DARK_VARS = """
   --bg:#04050d; --surf:#090a15; --surf2:#0e0f1e; --surf3:#131428;
   --bdr:#1c1d35; --bdr2:#262740;
+  --txt:#eeeef8; --dim:#6666aa; --dimmer:#3a3a6a;
+  --plot-bg:rgba(0,0,0,0); --plot-grid:#0e0f1e; --plot-line:#1c1d35;
+  --plot-font:#eeeef8; --plot-hover-bg:#0e0f1e; --plot-hover-bdr:#1c1d35;
+  --land:#131428; --ocean:#04050d;
+"""
+
+LIGHT_VARS = """
+  --bg:#f4f4f8; --surf:#ffffff; --surf2:#f0f0f6; --surf3:#e8e8f0;
+  --bdr:#d4d4e8; --bdr2:#c0c0dc;
+  --txt:#14143a; --dim:#6666aa; --dimmer:#a0a0c8;
+  --plot-bg:rgba(244,244,248,0); --plot-grid:#e8e8f0; --plot-line:#d4d4e8;
+  --plot-font:#14143a; --plot-hover-bg:#ffffff; --plot-hover-bdr:#d4d4e8;
+  --land:#e8e8f4; --ocean:#d0d8f0;
+"""
+
+THEME_VARS = DARK_VARS if IS_DARK else LIGHT_VARS
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Epilogue:wght@300;400;500;700;800;900&display=swap');
+
+:root{{
+  {THEME_VARS}
   --p1:#6c63ff; --p2:#00f5d4; --p3:#ff4d6d; --p4:#ffbe0b; --p5:#80ffdb;
   --p6:#ff6b35; --p7:#a78bfa;
-  --txt:#eeeef8; --dim:#6666aa; --dimmer:#3a3a6a;
   --mono:'IBM Plex Mono',monospace;
   --display:'Epilogue',sans-serif;
   --grad1:linear-gradient(135deg,#6c63ff 0%,#00f5d4 100%);
   --grad2:linear-gradient(135deg,#ff4d6d 0%,#ffbe0b 100%);
   --grad3:linear-gradient(135deg,#a78bfa 0%,#6c63ff 100%);
-}
+}}
 
-html,body,[class*="css"]{
+html,body,[class*="css"]{{
   background:var(--bg)!important;
   color:var(--txt)!important;
   font-family:var(--display)!important;
-}
-#MainMenu,footer,header{visibility:hidden;}
-.block-container{padding:1.6rem 2rem!important;max-width:1800px!important;}
+}}
+#MainMenu,footer,header{{visibility:hidden;}}
+.block-container{{padding:1.6rem 2rem!important;max-width:1800px!important;}}
 
 /* ── Hero ── */
-.hero-wrap{
+.hero-wrap{{
   position:relative;padding:1.8rem 0 1.2rem;
   border-bottom:1px solid var(--bdr);margin-bottom:1.2rem;
   overflow:hidden;
-}
-.hero-wrap::before{
+}}
+.hero-wrap::before{{
   content:'';position:absolute;top:-60px;right:-40px;
   width:480px;height:480px;border-radius:50%;
-  background:radial-gradient(circle,rgba(108,99,255,.18) 0%,transparent 70%);
+  background:radial-gradient(circle,rgba(108,99,255,.12) 0%,transparent 70%);
   pointer-events:none;
-}
-.hero-eyebrow{
+}}
+.hero-eyebrow{{
   font-family:var(--mono);font-size:.58rem;letter-spacing:.22em;
   text-transform:uppercase;color:var(--p2);margin-bottom:.4rem;
-}
-.hero-title{
+}}
+.hero-title{{
   font-family:var(--display);font-weight:900;font-size:3rem;
   line-height:.95;letter-spacing:-.05em;margin:0;
   background:var(--grad1);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-}
-.hero-sub{
+}}
+.hero-sub{{
   font-family:var(--mono);font-size:.61rem;color:var(--dim);
   letter-spacing:.1em;text-transform:uppercase;margin-top:.5rem;
-}
+}}
+
+/* ── Theme toggle pill ── */
+.theme-badge{{
+  display:inline-flex;align-items:center;gap:.35rem;
+  font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);
+  background:var(--surf2);border:1px solid var(--bdr);
+  border-radius:20px;padding:.25rem .7rem;cursor:pointer;
+  transition:all .2s;user-select:none;
+}}
+.theme-badge:hover{{border-color:var(--p1);color:var(--p1);}}
 
 /* ── Cards ── */
-.mcard{
+.mcard{{
   background:var(--surf);border:1px solid var(--bdr);border-radius:16px;
   padding:1.1rem 1.3rem;position:relative;overflow:hidden;
   transition:transform .18s,border-color .18s;
-}
-.mcard:hover{transform:translateY(-3px);border-color:var(--bdr2);}
-.mlabel{font-family:var(--mono);font-size:.57rem;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.15em;margin-bottom:.3rem;}
-.mval{font-family:var(--display);font-weight:800;font-size:2rem;line-height:1;}
-.msub{font-family:var(--mono);font-size:.57rem;color:var(--dim);margin-top:.3rem;}
-.bdg{display:inline-block;font-family:var(--mono);font-size:.57rem;
-  padding:.14rem .5rem;border-radius:20px;margin-top:.32rem;font-weight:700;}
-.bup{background:rgba(0,245,212,.12);color:#00f5d4;}
-.bdn{background:rgba(255,77,109,.12);color:#ff4d6d;}
-.bfl{background:rgba(108,99,255,.12);color:#a78bfa;}
-.bwarn{background:rgba(255,190,11,.12);color:#ffbe0b;}
+}}
+.mcard:hover{{transform:translateY(-3px);border-color:var(--bdr2);}}
+.mlabel{{font-family:var(--mono);font-size:.57rem;color:var(--dim);
+  text-transform:uppercase;letter-spacing:.15em;margin-bottom:.3rem;}}
+.mval{{font-family:var(--display);font-weight:800;font-size:2rem;line-height:1;}}
+.msub{{font-family:var(--mono);font-size:.57rem;color:var(--dim);margin-top:.3rem;}}
+.bdg{{display:inline-block;font-family:var(--mono);font-size:.57rem;
+  padding:.14rem .5rem;border-radius:20px;margin-top:.32rem;font-weight:700;}}
+.bup{{background:rgba(0,245,212,.12);color:#00f5d4;}}
+.bdn{{background:rgba(255,77,109,.12);color:#ff4d6d;}}
+.bfl{{background:rgba(108,99,255,.12);color:#a78bfa;}}
+.bwarn{{background:rgba(255,190,11,.12);color:#ffbe0b;}}
 
 /* Section header */
-.sh{
+.sh{{
   font-family:var(--mono);font-size:.56rem;letter-spacing:.2em;
   text-transform:uppercase;color:var(--dim);
   border-bottom:1px solid var(--bdr);
   padding-bottom:.32rem;margin:1.1rem 0 .65rem;
-}
+}}
 
 /* Chips */
-.chip{
+.chip{{
   display:inline-block;font-family:var(--mono);font-size:.64rem;
   padding:.2rem .68rem;border-radius:20px;margin:.18rem;
   border:1px solid;font-weight:700;
-}
+}}
 
 /* Insight box */
-.insight-box{
-  background:linear-gradient(135deg,rgba(108,99,255,.08),rgba(0,245,212,.05));
+.insight-box{{
+  background:{"linear-gradient(135deg,rgba(108,99,255,.08),rgba(0,245,212,.05))" if IS_DARK else "linear-gradient(135deg,rgba(108,99,255,.06),rgba(0,245,212,.04))"};
   border:1px solid rgba(108,99,255,.35);border-radius:14px;
   padding:1.2rem 1.4rem;margin:.6rem 0;
   font-family:var(--display);font-size:.9rem;line-height:1.65;color:var(--txt);
   position:relative;
-}
-.insight-box::before{
+}}
+.insight-box::before{{
   content:'🧠 AI INSIGHT';
   font-family:var(--mono);font-size:.52rem;color:var(--p1);
   letter-spacing:.16em;display:block;margin-bottom:.55rem;
-}
-.insight-box.alert{
-  background:linear-gradient(135deg,rgba(255,77,109,.08),rgba(255,190,11,.05));
+}}
+.insight-box.alert{{
+  background:{"linear-gradient(135deg,rgba(255,77,109,.08),rgba(255,190,11,.05))" if IS_DARK else "linear-gradient(135deg,rgba(255,77,109,.05),rgba(255,190,11,.04))"};
   border-color:rgba(255,77,109,.35);
-}
-.insight-box.alert::before{content:'🚨 ALERT';}
-.insight-box.battle{
-  background:linear-gradient(135deg,rgba(255,190,11,.08),rgba(255,107,53,.05));
+}}
+.insight-box.alert::before{{content:'🚨 ALERT';}}
+.insight-box.battle{{
+  background:{"linear-gradient(135deg,rgba(255,190,11,.08),rgba(255,107,53,.05))" if IS_DARK else "linear-gradient(135deg,rgba(255,190,11,.05),rgba(255,107,53,.04))"};
   border-color:rgba(255,190,11,.35);
-}
-.insight-box.battle::before{content:'⚔️ BATTLE MODE';}
-
-/* Prediction strip */
-.pred-strip{
-  display:flex;gap:1rem;flex-wrap:wrap;margin-top:.8rem;
-}
-.pred-item{
-  background:var(--surf2);border:1px solid var(--bdr);border-radius:10px;
-  padding:.6rem .9rem;flex:1;min-width:140px;
-}
-.pred-label{font-family:var(--mono);font-size:.54rem;color:var(--dim);
-  text-transform:uppercase;letter-spacing:.1em;margin-bottom:.2rem;}
-.pred-val{font-family:var(--display);font-weight:700;font-size:1.15rem;}
+}}
+.insight-box.battle::before{{content:'⚔️ BATTLE MODE';}}
 
 /* Demo banner */
-.demo-banner{
+.demo-banner{{
   background:rgba(255,190,11,.07);border:1px solid rgba(255,190,11,.3);
   border-radius:10px;padding:.65rem 1rem;margin-bottom:.9rem;
   font-family:var(--mono);font-size:.62rem;color:#ffbe0b;letter-spacing:.04em;
-}
+}}
 
 /* Sidebar */
-[data-testid="stSidebar"]{
+[data-testid="stSidebar"]{{
   background:var(--surf)!important;
   border-right:1px solid var(--bdr)!important;
-}
-[data-testid="stSidebar"] label{
+}}
+[data-testid="stSidebar"] label{{
   font-family:var(--mono)!important;font-size:.65rem!important;
   letter-spacing:.07em;color:var(--dim)!important;
-}
+}}
 
 /* Inputs */
-textarea,.stTextInput input{
+textarea,.stTextInput input{{
   background:var(--surf2)!important;border:1px solid var(--bdr)!important;
   color:var(--txt)!important;border-radius:8px!important;
   font-family:var(--mono)!important;font-size:.8rem!important;
-}
-.stSelectbox>div>div{
+}}
+.stSelectbox>div>div{{
   background:var(--surf2)!important;border-color:var(--bdr)!important;
   border-radius:8px!important;color:var(--txt)!important;
   font-family:var(--mono)!important;
-}
+}}
 
 /* Buttons */
-.stButton>button{
+.stButton>button{{
   background:linear-gradient(135deg,#6c63ff,#4c44cc)!important;
   color:#fff!important;border:none!important;border-radius:10px!important;
   font-family:var(--mono)!important;font-size:.72rem!important;
   font-weight:700!important;letter-spacing:.12em!important;
   padding:.65rem 1.4rem!important;text-transform:uppercase!important;
   transition:all .2s!important;
-}
-.stButton>button:hover{
+}}
+.stButton>button:hover{{
   transform:translateY(-2px)!important;
   box-shadow:0 8px 24px rgba(108,99,255,.4)!important;
-}
+}}
 
 /* Tabs */
-.stTabs [data-baseweb="tab-list"]{
+.stTabs [data-baseweb="tab-list"]{{
   background:var(--surf)!important;border-bottom:1px solid var(--bdr)!important;
   gap:.2rem!important;
-}
-.stTabs [data-baseweb="tab"]{
+}}
+.stTabs [data-baseweb="tab"]{{
   font-family:var(--mono)!important;font-size:.62rem!important;
   text-transform:uppercase!important;letter-spacing:.1em!important;
   color:var(--dim)!important;background:transparent!important;
   padding:.65rem 1.1rem!important;
-}
-.stTabs [aria-selected="true"]{
+}}
+.stTabs [aria-selected="true"]{{
   color:var(--txt)!important;
   border-bottom:2px solid var(--p1)!important;
-}
+}}
 
 /* Alerts */
-.stInfo{background:rgba(108,99,255,.08)!important;border:1px solid rgba(108,99,255,.25)!important;border-radius:8px!important;}
-.stWarning{background:rgba(255,190,11,.07)!important;border:1px solid rgba(255,190,11,.25)!important;border-radius:8px!important;}
-.stError{background:rgba(255,77,109,.08)!important;border:1px solid rgba(255,77,109,.25)!important;border-radius:8px!important;}
-.stSuccess{background:rgba(0,245,212,.08)!important;border:1px solid rgba(0,245,212,.25)!important;border-radius:8px!important;}
+.stInfo{{background:rgba(108,99,255,.08)!important;border:1px solid rgba(108,99,255,.25)!important;border-radius:8px!important;}}
+.stWarning{{background:rgba(255,190,11,.07)!important;border:1px solid rgba(255,190,11,.25)!important;border-radius:8px!important;}}
+.stError{{background:rgba(255,77,109,.08)!important;border:1px solid rgba(255,77,109,.25)!important;border-radius:8px!important;}}
+.stSuccess{{background:rgba(0,245,212,.08)!important;border:1px solid rgba(0,245,212,.25)!important;border-radius:8px!important;}}
 
-.stDataFrame{border:1px solid var(--bdr)!important;border-radius:8px!important;}
-hr{border-color:var(--bdr)!important;}
-::-webkit-scrollbar{width:4px;height:4px;}
-::-webkit-scrollbar-track{background:var(--bg);}
-::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:4px;}
-::-webkit-scrollbar-thumb:hover{background:var(--p1);}
+.stDataFrame{{border:1px solid var(--bdr)!important;border-radius:8px!important;}}
+hr{{border-color:var(--bdr)!important;}}
+::-webkit-scrollbar{{width:4px;height:4px;}}
+::-webkit-scrollbar-track{{background:var(--bg);}}
+::-webkit-scrollbar-thumb{{background:var(--bdr2);border-radius:4px;}}
+::-webkit-scrollbar-thumb:hover{{background:var(--p1);}}
 
-/* Progress bars (volatility/momentum) */
-.meter-wrap{margin:.4rem 0;}
-.meter-label{font-family:var(--mono);font-size:.56rem;color:var(--dim);
+/* Progress bars */
+.meter-wrap{{margin:.4rem 0;}}
+.meter-label{{font-family:var(--mono);font-size:.56rem;color:var(--dim);
   text-transform:uppercase;letter-spacing:.1em;margin-bottom:.22rem;
-  display:flex;justify-content:space-between;}
-.meter-bar{height:6px;border-radius:3px;background:var(--surf2);overflow:hidden;}
-.meter-fill{height:100%;border-radius:3px;transition:width .5s ease;}
+  display:flex;justify-content:space-between;}}
+.meter-bar{{height:6px;border-radius:3px;background:var(--surf2);overflow:hidden;}}
+.meter-fill{{height:100%;border-radius:3px;transition:width .5s ease;}}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Plot layout base (theme-aware) ─────────────────────────────────────────────
 PAL = ["#6c63ff", "#00f5d4", "#ff4d6d", "#ffbe0b", "#a78bfa"]
+
+_PLOT_FONT_COLOR   = "#eeeef8" if IS_DARK else "#14143a"
+_PLOT_GRID_COLOR   = "#0e0f1e" if IS_DARK else "#e8e8f0"
+_PLOT_LINE_COLOR   = "#1c1d35" if IS_DARK else "#d4d4e8"
+_PLOT_HOVER_BG     = "#0e0f1e" if IS_DARK else "#ffffff"
+_PLOT_HOVER_BDR    = "#1c1d35" if IS_DARK else "#d4d4e8"
+_PLOT_LEGEND_BG    = "rgba(9,10,21,.95)" if IS_DARK else "rgba(255,255,255,.95)"
+_LAND_COLOR        = "#131428" if IS_DARK else "#e8e8f4"
+_OCEAN_COLOR       = "#04050d" if IS_DARK else "#d0d8f0"
 
 BL = dict(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="IBM Plex Mono,monospace", color="#eeeef8", size=11),
-    title_font=dict(family="Epilogue,sans-serif", size=13, color="#eeeef8"),
-    legend=dict(bgcolor="rgba(9,10,21,.95)", bordercolor="#1c1d35",
+    font=dict(family="IBM Plex Mono,monospace", color=_PLOT_FONT_COLOR, size=11),
+    title_font=dict(family="Epilogue,sans-serif", size=13, color=_PLOT_FONT_COLOR),
+    legend=dict(bgcolor=_PLOT_LEGEND_BG, bordercolor=_PLOT_LINE_COLOR,
                 borderwidth=1, font=dict(size=10, family="IBM Plex Mono")),
-    xaxis=dict(gridcolor="#0e0f1e", linecolor="#1c1d35", tickfont=dict(size=10), zeroline=False),
-    yaxis=dict(gridcolor="#0e0f1e", linecolor="#1c1d35", tickfont=dict(size=10), zeroline=False),
+    xaxis=dict(gridcolor=_PLOT_GRID_COLOR, linecolor=_PLOT_LINE_COLOR,
+               tickfont=dict(size=10, color=_PLOT_FONT_COLOR), zeroline=False),
+    yaxis=dict(gridcolor=_PLOT_GRID_COLOR, linecolor=_PLOT_LINE_COLOR,
+               tickfont=dict(size=10, color=_PLOT_FONT_COLOR), zeroline=False),
     margin=dict(l=10, r=10, t=36, b=10),
     hovermode="x unified",
-    hoverlabel=dict(bgcolor="#0e0f1e", bordercolor="#1c1d35",
-                    font=dict(family="IBM Plex Mono", size=11)),
+    hoverlabel=dict(bgcolor=_PLOT_HOVER_BG, bordercolor=_PLOT_HOVER_BDR,
+                    font=dict(family="IBM Plex Mono", size=11, color=_PLOT_FONT_COLOR)),
 )
 
 TIME_OPTS = {
@@ -306,6 +336,7 @@ for key, default in [
     ("req_cache", {}), ("last_call_ts", 0.0),
     ("demo_mode", False), ("ai_insights", {}),
     ("alerts", []), ("alert_threshold", 70),
+    ("theme", "dark"),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -497,11 +528,10 @@ def get_trending(geo):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# NEW: AI ANALYTICS FUNCTIONS
+# AI ANALYTICS FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def compute_momentum(df, kw):
-    """Returns momentum % change from first quarter to last quarter."""
     q = max(1, len(df) // 4)
     f = df[kw].iloc[:q].mean()
     l = df[kw].iloc[-q:].mean()
@@ -509,7 +539,6 @@ def compute_momentum(df, kw):
 
 
 def compute_volatility(df, kw):
-    """Returns coefficient of variation as a 0-100 volatility score."""
     mean = df[kw].mean()
     std = df[kw].std()
     cv = (std / (mean + 1e-9)) * 100
@@ -517,17 +546,12 @@ def compute_volatility(df, kw):
 
 
 def compute_spike_score(df, kw):
-    """Returns highest single-period spike above rolling mean."""
     rolling = df[kw].rolling(7, min_periods=1).mean()
     diff = df[kw] - rolling
     return round(float(diff.max()), 1)
 
 
 def predict_trend(df, kw, forecast_days=30):
-    """
-    Linear regression forecast for next `forecast_days` data points.
-    Returns (future_dates, predicted_values, trend_direction, r2_score).
-    """
     from sklearn.metrics import r2_score as _r2
     series = df[kw].dropna()
     if len(series) < 5:
@@ -544,7 +568,6 @@ def predict_trend(df, kw, forecast_days=30):
     pred = model.predict(future_X)
     pred = np.clip(pred, 0, 100)
 
-    # Infer frequency from index
     if len(df.index) >= 2:
         freq = df.index[1] - df.index[0]
     else:
@@ -558,12 +581,6 @@ def predict_trend(df, kw, forecast_days=30):
 
 
 def detect_alerts(df, kws, threshold=70):
-    """
-    Detects:
-    1. Keywords currently above threshold
-    2. Sudden spikes (last value >> rolling mean)
-    3. Rapid decline (last value << rolling mean)
-    """
     alerts = []
     for kw in kws:
         if kw not in df.columns:
@@ -594,17 +611,12 @@ def detect_alerts(df, kws, threshold=70):
 
 
 def generate_ai_insight(df, kws, related=None):
-    """
-    Rule-based AI insight generator. Produces a natural language summary
-    of trends, correlations, momentum, and competitive dynamics.
-    """
     valid = [k for k in kws if k in df.columns]
     if not valid:
         return "No data available for insight generation."
 
     parts = []
 
-    # 1. Overall leader
     avgs = {k: df[k].mean() for k in valid}
     leader = max(avgs, key=avgs.get)
     loser  = min(avgs, key=avgs.get)
@@ -613,7 +625,6 @@ def generate_ai_insight(df, kws, related=None):
         f"while **{loser}** trails with {avgs[loser]:.0f}/100."
     )
 
-    # 2. Momentum narrative
     mom_data = {k: compute_momentum(df, k) for k in valid}
     fastest_rising = max(mom_data, key=mom_data.get)
     fastest_falling = min(mom_data, key=mom_data.get)
@@ -629,7 +640,6 @@ def generate_ai_insight(df, kws, related=None):
             f"interest appears to be cooling."
         )
 
-    # 3. Volatility insight
     vols = {k: compute_volatility(df, k) for k in valid}
     most_volatile = max(vols, key=vols.get)
     most_stable = min(vols, key=vols.get)
@@ -644,7 +654,6 @@ def generate_ai_insight(df, kws, related=None):
             f"(volatility: {vols[most_stable]:.0f}/100), suggesting steady, sustained demand."
         )
 
-    # 4. Correlation insight
     if len(valid) >= 2:
         corr_matrix = df[valid].corr()
         pairs = [(corr_matrix.loc[a, b], a, b)
@@ -664,7 +673,6 @@ def generate_ai_insight(df, kws, related=None):
                     f"indicating different search audiences or use cases."
                 )
 
-    # 5. Prediction hint
     future_dates, pred_vals, direction, r2 = predict_trend(df, leader)
     if future_dates and r2 > 0.3:
         next_val = round(pred_vals[6], 0) if len(pred_vals) >= 7 else round(pred_vals[-1], 0)
@@ -677,7 +685,6 @@ def generate_ai_insight(df, kws, related=None):
 
 
 def generate_battle_summary(df, kws):
-    """Generates keyword battle summary with winner, fastest growth, most consistent."""
     valid = [k for k in kws if k in df.columns]
     if len(valid) < 2:
         return None, {}
@@ -725,10 +732,8 @@ def ch_line(df, kws, stacked=False):
 
 
 def ch_line_with_forecast(df, kw, color):
-    """Line chart with forecast overlay."""
     future_dates, pred_vals, direction, r2 = predict_trend(df, kw, forecast_days=30)
     fig = go.Figure()
-    # Actual
     fig.add_trace(go.Scatter(
         x=df.index, y=df[kw], name=f"{kw} (actual)",
         line=dict(color=color, width=2.4, shape="spline", smoothing=0.7),
@@ -736,7 +741,6 @@ def ch_line_with_forecast(df, kw, color):
         hovertemplate=f"<b>{kw}</b>: %{{y}}<extra></extra>",
     ))
     if future_dates:
-        # Confidence band
         upper = [min(v + 8, 100) for v in pred_vals]
         lower = [max(v - 8, 0) for v in pred_vals]
         fig.add_trace(go.Scatter(
@@ -746,7 +750,6 @@ def ch_line_with_forecast(df, kw, color):
             line=dict(color="rgba(0,0,0,0)"), showlegend=False,
             hoverinfo="skip",
         ))
-        # Forecast line
         fig.add_trace(go.Scatter(
             x=future_dates, y=pred_vals, name=f"Forecast (R²={r2:.2f})",
             line=dict(color=color, width=1.8, dash="dot"),
@@ -763,7 +766,7 @@ def ch_corr(df, kws):
     corr = df[valid].corr().round(3)
     fig = go.Figure(go.Heatmap(
         z=corr.values, x=corr.columns, y=corr.index,
-        colorscale=[[0, "#ff4d6d"], [.5, "#09091a"], [1, "#00f5d4"]],
+        colorscale=[[0, "#ff4d6d"], [.5, "#09091a" if IS_DARK else "#f4f4f8"], [1, "#00f5d4"]],
         zmin=-1, zmax=1,
         text=[[f"{v:.2f}" for v in row] for row in corr.values],
         texttemplate="%{text}", textfont=dict(family="IBM Plex Mono", size=12),
@@ -781,13 +784,16 @@ def ch_geo_map(geo_df, kw):
     d = d[d["value"] > 0]
     fig = px.choropleth(d, locations="location", locationmode="country names",
                         color="value", hover_name="location", labels={"value": "Interest"},
-                        color_continuous_scale=[[0,"#04050d"],[.3,"#1a1040"],[.7,"#6c63ff"],[1,"#00f5d4"]])
+                        color_continuous_scale=[[0, "#04050d" if IS_DARK else "#f4f4f8"],
+                                                [.3, "#1a1040" if IS_DARK else "#d8d0f0"],
+                                                [.7, "#6c63ff"], [1, "#00f5d4"]])
     fig.update_layout(**BL, height=340,
-                      geo=dict(bgcolor="rgba(0,0,0,0)", landcolor="#131428",
-                               oceancolor="#04050d", showocean=True, lakecolor="#04050d",
-                               framecolor="#1c1d35", projection_type="natural earth"),
+                      geo=dict(bgcolor="rgba(0,0,0,0)", landcolor=_LAND_COLOR,
+                               oceancolor=_OCEAN_COLOR, showocean=True, lakecolor=_OCEAN_COLOR,
+                               framecolor=_PLOT_LINE_COLOR, projection_type="natural earth"),
                       coloraxis_colorbar=dict(bgcolor="rgba(0,0,0,0)",
-                                             tickfont=dict(family="IBM Plex Mono", size=9)))
+                                             tickfont=dict(family="IBM Plex Mono", size=9,
+                                                          color=_PLOT_FONT_COLOR)))
     return fig
 
 
@@ -845,8 +851,10 @@ def ch_radar(df, kws):
     ))
     fig.update_layout(**BL, height=290,
                       polar=dict(bgcolor="rgba(0,0,0,0)",
-                                 radialaxis=dict(visible=True, gridcolor="#131428", tickfont=dict(size=9)),
-                                 angularaxis=dict(gridcolor="#131428", tickfont=dict(size=10))))
+                                 radialaxis=dict(visible=True, gridcolor=_PLOT_GRID_COLOR,
+                                                tickfont=dict(size=9, color=_PLOT_FONT_COLOR)),
+                                 angularaxis=dict(gridcolor=_PLOT_GRID_COLOR,
+                                                 tickfont=dict(size=10, color=_PLOT_FONT_COLOR))))
     return fig
 
 
@@ -883,24 +891,33 @@ def ch_momentum(df, kws):
         fig.add_trace(go.Bar(x=[r["kw"]], y=[r["chg"]], name=r["kw"],
                              marker_color=c, marker_line_width=0,
                              hovertemplate=f"<b>{r['kw']}</b><br>Δ %{{y:+.1f}}%<extra></extra>"))
-    fig.add_hline(y=0, line_color="#1c1d35", line_width=1)
+    fig.add_hline(y=0, line_color=_PLOT_LINE_COLOR, line_width=1)
     fig.update_layout(**BL, height=240, showlegend=False, yaxis_title="% Change")
     return fig
 
 
+# ── FIX: ch_related_bar — no more duplicate yaxis kwarg ──────────────────────
 def ch_related_bar(df_q, color, title):
     if df_q is None or df_q.empty:
         return None
     d = df_q.head(10)
+    # Build layout by merging BL then overriding yaxis separately (avoids duplicate kwarg)
+    layout = {
+        **BL,
+        "height": 270,
+        "showlegend": False,
+        "yaxis": {**BL["yaxis"], "autorange": "reversed"},
+        "title_text": title,
+        "title_font": dict(size=12),
+    }
     fig = go.Figure(go.Bar(
         x=d["value"], y=d["query"], orientation="h",
         marker_color=color, marker_line_width=0,
         hovertemplate="%{y}<br>Value: %{x}<extra></extra>",
     ))
-    fig.update_layout(**BL, height=270, showlegend=False,
-                      yaxis=dict(autorange="reversed", **BL["yaxis"]),
-                      title_text=title, title_font=dict(size=12))
+    fig.update_layout(**layout)
     return fig
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def ch_battle_scores(scores, kws):
@@ -937,12 +954,13 @@ def styled_table(df: pd.DataFrame):
         f"font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;text-align:right;'>{c}</th>"
         for c in cols) + "</tr>"
 
+    surf = "#090a15" if IS_DARK else "#ffffff"
     return f"""
     <div style='overflow-x:auto;'>
     <table style='width:100%;border-collapse:collapse;font-family:IBM Plex Mono,monospace;
-                  font-size:.7rem;color:#eeeef8;background:#090a15;
-                  border:1px solid #1c1d35;border-radius:8px;overflow:hidden;'>
-      <thead style='border-bottom:1px solid #1c1d35;'>{header_html}</thead>
+                  font-size:.7rem;color:{_PLOT_FONT_COLOR};background:{surf};
+                  border:1px solid {_PLOT_LINE_COLOR};border-radius:8px;overflow:hidden;'>
+      <thead style='border-bottom:1px solid {_PLOT_LINE_COLOR};'>{header_html}</thead>
       <tbody>{rows_html}</tbody>
     </table></div>"""
 
@@ -975,9 +993,17 @@ with st.sidebar:
       </div>
       <div style='font-family:IBM Plex Mono,monospace;font-size:.52rem;color:#6666aa;
                   letter-spacing:.15em;text-transform:uppercase;margin-top:.1rem;'>
-        Intelligent Trends Platform v5
+        Intelligent Trends Platform v5.1
       </div>
     </div>""", unsafe_allow_html=True)
+
+    # ── Theme toggle ──────────────────────────────────────────────────────────
+    st.markdown('<div class="sh">Appearance</div>', unsafe_allow_html=True)
+    theme_icon = "🌙" if IS_DARK else "☀️"
+    theme_label = "Switch to Light Mode" if IS_DARK else "Switch to Dark Mode"
+    if st.button(f"{theme_icon}  {theme_label}", use_container_width=True):
+        st.session_state.theme = "light" if IS_DARK else "dark"
+        st.rerun()
 
     st.markdown('<div class="sh">Keywords (max 5)</div>', unsafe_allow_html=True)
     raw = st.text_area("kw", value="ChatGPT\nGemini\nClaude AI\nCopilot",
@@ -1011,9 +1037,9 @@ with st.sidebar:
     st.markdown("")
     run = st.button("⚡  ANALYZE TRENDS", use_container_width=True)
 
-    st.markdown("""
-    <div style='margin-top:1.2rem;padding:.8rem;background:#090a15;border:1px solid #1c1d35;
-                border-radius:10px;font-family:IBM Plex Mono,monospace;font-size:.54rem;color:#6666aa;'>
+    st.markdown(f"""
+    <div style='margin-top:1.2rem;padding:.8rem;background:var(--surf2);border:1px solid var(--bdr);
+                border-radius:10px;font-family:IBM Plex Mono,monospace;font-size:.54rem;color:var(--dim);'>
       <div style='color:#6c63ff;margin-bottom:.3rem;font-weight:700;'>ℹ CAPABILITIES</div>
       🧠 AI insight generator<br>
       🔮 30-day trend forecast<br>
@@ -1022,7 +1048,8 @@ with st.sidebar:
       📊 Volatility + momentum<br>
       🗺️ Geographic analysis<br>
       📥 CSV export<br>
-      ⚡ Session caching
+      ⚡ Session caching<br>
+      {"🌙 Dark mode active" if IS_DARK else "☀️ Light mode active"}
     </div>""", unsafe_allow_html=True)
 
 
@@ -1046,6 +1073,9 @@ with hc2:
       </div>
       <div style='font-family:IBM Plex Mono;font-size:.52rem;color:#6666aa;margin-top:.18rem;'>
         {geo_lbl} · {tf_lbl}
+      </div>
+      <div style='font-family:IBM Plex Mono;font-size:.5rem;color:#6666aa;margin-top:.12rem;'>
+        {"🌙 DARK" if IS_DARK else "☀️ LIGHT"} MODE
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -1094,7 +1124,7 @@ alerts = detect_alerts(df, valid, threshold=st.session_state.alert_threshold)
 st.session_state.alerts = alerts
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ALERT BANNER (top-level, always visible)
+# ALERT BANNER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if alerts:
     for a in alerts:
@@ -1150,7 +1180,7 @@ t1, t2, t3, t4, t5, t6, t7 = st.tabs([
     "📊  Deep Analysis",
 ])
 
-# ── Tab 1: Interest Over Time ─────────────────────────────────────────────────
+# ── Tab 1 ─────────────────────────────────────────────────────────────────────
 with t1:
     st.markdown('<div class="sh">Search Interest · 0–100 Normalized Scale</div>', unsafe_allow_html=True)
     st.plotly_chart(ch_line(df, valid, stacked=(mode == "Stacked Area")),
@@ -1168,7 +1198,7 @@ with t1:
                            "trends_data.csv", "text/csv", use_container_width=True)
 
 
-# ── Tab 2: Predictions ────────────────────────────────────────────────────────
+# ── Tab 2 ─────────────────────────────────────────────────────────────────────
 with t2:
     st.markdown('<div class="sh">30-Day Trend Forecast · Linear Regression</div>', unsafe_allow_html=True)
     st.caption("Forecast uses the historical trend trajectory. Higher R² = better fit.")
@@ -1177,10 +1207,8 @@ with t2:
         c = PAL[i % len(PAL)]
         fig, direction, r2 = ch_line_with_forecast(df, kw, c)
         if fig:
-            # Direction badge
             dir_color = "#00f5d4" if direction == "rising" else ("#ff4d6d" if direction == "declining" else "#a78bfa")
             dir_icon = "🟢" if direction == "rising" else ("🔴" if direction == "declining" else "🟡")
-            # Forecast strip
             future_dates, pred_vals, _, _ = predict_trend(df, kw, 30)
             pred_7 = round(pred_vals[6], 0) if pred_vals and len(pred_vals) > 6 else "—"
             pred_30 = round(pred_vals[-1], 0) if pred_vals else "—"
@@ -1194,17 +1222,13 @@ with t2:
                             padding:1rem;height:100%;margin-top:.5rem;'>
                   <div style='font-family:IBM Plex Mono;font-size:.55rem;color:var(--dim);
                               text-transform:uppercase;letter-spacing:.1em;margin-bottom:.7rem;'>{kw}</div>
-
                   <div style='font-family:IBM Plex Mono;font-size:.55rem;color:var(--dim);margin-bottom:.15rem;'>DIRECTION</div>
                   <div style='font-family:Epilogue;font-weight:700;font-size:1rem;color:{dir_color};margin-bottom:.6rem;'>
                     {dir_icon} {direction.upper()}</div>
-
                   <div style='font-family:IBM Plex Mono;font-size:.55rem;color:var(--dim);margin-bottom:.15rem;'>7-DAY FORECAST</div>
                   <div style='font-family:Epilogue;font-weight:700;font-size:1.2rem;color:{c};margin-bottom:.6rem;'>{pred_7}/100</div>
-
                   <div style='font-family:IBM Plex Mono;font-size:.55rem;color:var(--dim);margin-bottom:.15rem;'>30-DAY FORECAST</div>
                   <div style='font-family:Epilogue;font-weight:700;font-size:1.2rem;color:{c};margin-bottom:.6rem;'>{pred_30}/100</div>
-
                   <div style='font-family:IBM Plex Mono;font-size:.55rem;color:var(--dim);margin-bottom:.15rem;'>MODEL FIT (R²)</div>
                   <div style='font-family:Epilogue;font-weight:700;font-size:1rem;color:#ffbe0b;'>{r2:.3f}</div>
                 </div>""", unsafe_allow_html=True)
@@ -1214,7 +1238,7 @@ with t2:
     st.info("📌 Forecasts use linear regression on historical data. For volatile trends, treat as directional guidance rather than precise prediction.")
 
 
-# ── Tab 3: AI Insights ────────────────────────────────────────────────────────
+# ── Tab 3 ─────────────────────────────────────────────────────────────────────
 with t3:
     st.markdown('<div class="sh">AI-Generated Analysis</div>', unsafe_allow_html=True)
 
@@ -1229,7 +1253,6 @@ with t3:
 
     st.markdown(f'<div class="insight-box">{insight_text}</div>', unsafe_allow_html=True)
 
-    # Per-keyword intelligence cards
     st.markdown('<div class="sh">Per-Keyword Intelligence</div>', unsafe_allow_html=True)
     cols = st.columns(len(valid))
     for i, kw in enumerate(valid):
@@ -1256,7 +1279,6 @@ with t3:
               </div>
             </div>""", unsafe_allow_html=True)
 
-    # Correlation interpretation
     if len(valid) >= 2:
         st.markdown('<div class="sh">Correlation Interpretation</div>', unsafe_allow_html=True)
         corr = df[valid].corr()
@@ -1282,7 +1304,7 @@ with t3:
                 interp_html += f"""
                 <div style='background:var(--surf2);border:1px solid var(--bdr);border-radius:10px;
                             padding:.7rem 1rem;margin-bottom:.5rem;
-                            font-family:Epilogue;font-size:.85rem;'>
+                            font-family:Epilogue;font-size:.85rem;color:var(--txt);'>
                   <b style='color:{PAL[i%len(PAL)]};'>{a}</b>
                   <span style='color:var(--dim);font-size:.75rem;font-family:IBM Plex Mono;'> × </span>
                   <b style='color:{PAL[j%len(PAL)]};'>{b}</b>
@@ -1294,7 +1316,7 @@ with t3:
         st.markdown(interp_html, unsafe_allow_html=True)
 
 
-# ── Tab 4: Battle Mode ────────────────────────────────────────────────────────
+# ── Tab 4 ─────────────────────────────────────────────────────────────────────
 with t4:
     if len(valid) < 2:
         st.info("Battle Mode requires at least 2 keywords. Add more in the sidebar.")
@@ -1306,7 +1328,6 @@ with t4:
             st.markdown(f'<div class="insight-box battle">{battle_summary}</div>',
                         unsafe_allow_html=True)
 
-        # Score chart
         if scores:
             sc, rc = st.columns([2, 1])
             with sc:
@@ -1323,7 +1344,7 @@ with t4:
                                 padding:.5rem .8rem;margin-bottom:.35rem;
                                 background:var(--surf2);border:1px solid var(--bdr);
                                 border-left:3px solid {c};border-radius:8px;'>
-                      <span style='font-family:IBM Plex Mono;font-size:.7rem;'>
+                      <span style='font-family:IBM Plex Mono;font-size:.7rem;color:var(--txt);'>
                         {medals[rank]} <b style='color:{c};'>{kw}</b>
                       </span>
                       <span style='font-family:Epilogue;font-weight:700;font-size:.95rem;color:{c};'>
@@ -1331,7 +1352,6 @@ with t4:
                       </span>
                     </div>""", unsafe_allow_html=True)
 
-        # Detailed breakdown table
         st.markdown('<div class="sh">Detailed Breakdown</div>', unsafe_allow_html=True)
         battle_data = []
         for kw in valid:
@@ -1349,7 +1369,7 @@ with t4:
         st.dataframe(bdf, use_container_width=True)
 
 
-# ── Tab 5: Geographic ─────────────────────────────────────────────────────────
+# ── Tab 5 ─────────────────────────────────────────────────────────────────────
 with t5:
     with st.spinner("Loading geographic data…"):
         gdf, g_demo = get_by_region(kws, tf, geo, cat)
@@ -1371,7 +1391,7 @@ with t5:
         st.info("No geographic data available.")
 
 
-# ── Tab 6: Related Queries ────────────────────────────────────────────────────
+# ── Tab 6 ─────────────────────────────────────────────────────────────────────
 with t6:
     with st.spinner("Loading related queries…"):
         rel, rq_demo = get_related(kws, tf, geo, cat)
@@ -1398,7 +1418,7 @@ with t6:
         st.info("No related queries data.")
 
 
-# ── Tab 7: Deep Analysis ──────────────────────────────────────────────────────
+# ── Tab 7 ─────────────────────────────────────────────────────────────────────
 with t7:
     ca, cb = st.columns(2)
     with ca:
@@ -1431,7 +1451,7 @@ st.markdown("<hr style='margin-top:1.8rem;'>", unsafe_allow_html=True)
 st.markdown(f"""
 <div style='font-family:IBM Plex Mono,monospace;font-size:.52rem;color:#6666aa;
             display:flex;justify-content:space-between;padding:.35rem 0 1rem;flex-wrap:wrap;gap:.35rem;'>
-  <span>TREND PULSE AI v5 &nbsp;·&nbsp; urllib3 v2 ✓ &nbsp;·&nbsp; sklearn ✓</span>
+  <span>TREND PULSE AI v5.1 &nbsp;·&nbsp; urllib3 v2 ✓ &nbsp;·&nbsp; sklearn ✓ &nbsp;·&nbsp; Bug fixes ✓</span>
   <span>{geo_lbl} &nbsp;·&nbsp; {tf_lbl} &nbsp;·&nbsp; {cat_lbl}</span>
-  <span>{'⚡ DEMO DATA' if (is_demo or st.session_state.demo_mode) else '🌐 LIVE DATA'} &nbsp;·&nbsp; pytrends + AI</span>
+  <span>{'⚡ DEMO DATA' if (is_demo or st.session_state.demo_mode) else '🌐 LIVE DATA'} &nbsp;·&nbsp; {"🌙 Dark" if IS_DARK else "☀️ Light"} Mode</span>
 </div>""", unsafe_allow_html=True)
